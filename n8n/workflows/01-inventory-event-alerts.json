@@ -1,0 +1,93 @@
+{
+  "name": "Restoflow - Inventory Event Alerts",
+  "id": "Gxi3xBnnZfFiRMal",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 1 }] } },
+      "id": "34337d52-8e75-4856-b70a-bf34b4a467f1",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-720, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.RESTOFLOW_BASE_URL + '/api/integrations/n8n/events?limit=50&branch=' + ($env.RESTOFLOW_PILOT_BRANCH || 'MAIN') }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.RESTOFLOW_TOKEN }}" }] },
+        "options": {}
+      },
+      "id": "d0782b51-edaf-4096-ad8b-3e9df39ce1f1",
+      "name": "Fetch Pending Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-500, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const events = items[0].json.events ?? [];\nreturn events.filter((event) => event.type !== 'WASTE_LOGGED').map((event) => ({ json: event }));"
+      },
+      "id": "e2925e31-0c62-42bf-a76c-5215880b97d1",
+      "name": "Expand Urgent Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-280, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const labels = { INVENTORY_LOW: '⚠️ Low stock', INVENTORY_CRITICAL: '🚨 Critical stock', INVENTORY_RECOVERED: '✅ Stock recovered', NEGATIVE_STOCK_OVERRIDE: '🚨 Negative-stock override', MISSING_RECIPE: '⚠️ Missing recipe' };\nreturn items.map(({ json }) => {\n  const p = json.payload ?? {};\n  const details = p.ingredientName ? `${p.ingredientName}: ${p.quantity} ${p.unit ?? ''} (low at ${p.lowStockAt ?? '?'})` : p.products ? p.products.map((x) => x.name).join(', ') : p.saleId ? `Sale ${p.saleId}` : JSON.stringify(p);\n  const path = p.inventoryPath ?? p.salePath ?? '/reports';\n  return { json: { ...json, telegramMessage: `${labels[json.type] ?? json.type} — ${json.branch?.name ?? 'Restoflow'}\\n${details}\\n${$env.RESTOFLOW_BASE_URL}${path}` } };\n});"
+      },
+      "id": "be23ff5d-691a-4a77-a135-8ef89e359f2a",
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-60, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_OPERATIONS_CHAT_ID, text: $json.telegramMessage, disable_web_page_preview: true }) }}",
+        "options": {}
+      },
+      "id": "b9200c38-3a08-4e14-a3f1-d346cb297547",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [170, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RESTOFLOW_BASE_URL + '/api/integrations/n8n/events/' + $('Format Alert').item.json.id + '/ack' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.RESTOFLOW_TOKEN }}" },
+            { "name": "Idempotency-Key", "value": "={{ 'ack-' + $('Format Alert').item.json.id }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0cc5cf52-bf82-47c2-9ee4-5c86e95c5c1c",
+      "name": "Acknowledge Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 0]
+    }
+  ],
+  "connections": {
+    "Every Minute": { "main": [[{ "node": "Fetch Pending Events", "type": "main", "index": 0 }]] },
+    "Fetch Pending Events": { "main": [[{ "node": "Expand Urgent Events", "type": "main", "index": 0 }]] },
+    "Expand Urgent Events": { "main": [[{ "node": "Format Alert", "type": "main", "index": 0 }]] },
+    "Format Alert": { "main": [[{ "node": "Send Telegram Alert", "type": "main", "index": 0 }]] },
+    "Send Telegram Alert": { "main": [[{ "node": "Acknowledge Event", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1", "timezone": "Asia/Manila" },
+  "active": false,
+  "versionId": "d8fb6716-e95d-4ee2-8cc5-3396ed6b3ec5"
+}

@@ -1,0 +1,73 @@
+{
+  "name": "Restoflow - Daily Operations Digest",
+  "id": "uxgnF01ybqzh4iMO",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "cronExpression", "expression": "30 23 * * *" }] } },
+      "id": "2df64d44-1eaf-4dfc-a0ef-b3736c454e72",
+      "name": "At 11 30 PM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());\nconst value = Object.fromEntries(parts.map((part) => [part.type, part.value]));\nreturn [{ json: { date: `${value.year}-${value.month}-${value.day}` } }];"
+      },
+      "id": "ca58dd09-0ea6-40f6-82d0-0791a3e59bbb",
+      "name": "Manila Business Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.RESTOFLOW_BASE_URL + '/api/integrations/n8n/daily-summary?branch=' + ($env.RESTOFLOW_PILOT_BRANCH || 'MAIN') + '&date=' + $json.date }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.RESTOFLOW_TOKEN }}" }] },
+        "options": {}
+      },
+      "id": "303591c7-60f5-4d07-a28e-697b349240c0",
+      "name": "Fetch Daily Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-150, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $json;\nconst money = (cents) => `₱${(Number(cents || 0) / 100).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;\nconst lows = [...s.inventory.critical, ...s.inventory.low].slice(0, 5).map((x) => `• ${x.ingredientName}: ${x.quantity} ${x.unit}`).join('\\n') || '• None';\nconst waste = s.waste.entries.slice(0, 5).map((x) => `• ${x.ingredientName}: ${x.quantity} ${x.unit} (${money(x.valueCents)})`).join('\\n') || '• None logged';\nconst unmapped = s.recipeCoverage.unmappedProducts.slice(0, 5).map((x) => `• ${x.name}: ${x.quantity}`).join('\\n') || '• None';\nconst message = `📊 Restoflow daily — ${s.branch.name} — ${s.date}\\nSales: ${money(s.sales.revenueCents)} / ${s.sales.transactions} tickets\\nAvg ticket: ${money(s.sales.averageTicketCents)}\\nFood cost: ${money(s.foodCost.cogsCents)} (${Number(s.foodCost.foodCostPercent).toFixed(1)}%)\\nRecipe coverage: ${Number(s.recipeCoverage.revenuePercent).toFixed(1)}% of revenue\\n\\nLow / critical stock:\\n${lows}\\n\\nWaste (${money(s.waste.totalValueCents)}):\\n${waste}\\n\\nUnmapped sales:\\n${unmapped}\\n\\nOpen requests: ${s.replenishment.openRequests}; in transit: ${s.replenishment.inTransitTransfers}\\n${$env.RESTOFLOW_BASE_URL}/reports`;\nconst chatIds = [...new Set([$env.TELEGRAM_OWNER_CHAT_ID, $env.TELEGRAM_MANAGER_CHAT_ID].filter(Boolean))];\nreturn chatIds.map((chatId) => ({ json: { chatId, message } }));"
+      },
+      "id": "a658a46a-d6a6-4bfe-9d91-5a11b687919f",
+      "name": "Format Owner and Manager Digests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.message, disable_web_page_preview: true }) }}",
+        "options": {}
+      },
+      "id": "c0339250-9477-4c31-ac74-908869a28a1a",
+      "name": "Send Daily Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [320, 0]
+    }
+  ],
+  "connections": {
+    "At 11 30 PM": { "main": [[{ "node": "Manila Business Date", "type": "main", "index": 0 }]] },
+    "Manila Business Date": { "main": [[{ "node": "Fetch Daily Summary", "type": "main", "index": 0 }]] },
+    "Fetch Daily Summary": { "main": [[{ "node": "Format Owner and Manager Digests", "type": "main", "index": 0 }]] },
+    "Format Owner and Manager Digests": { "main": [[{ "node": "Send Daily Digest", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1", "timezone": "Asia/Manila" },
+  "active": false,
+  "versionId": "5fae738a-cd3d-4a82-879a-214611406b6f"
+}

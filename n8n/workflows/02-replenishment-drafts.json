@@ -1,0 +1,81 @@
+{
+  "name": "Restoflow - Replenishment Drafts",
+  "id": "GHYhOKEMeq5YuxZy",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] } },
+      "id": "447c69c8-3d24-4737-b381-a312b16ac21c",
+      "name": "Every Five Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 0]
+    },
+    {
+      "parameters": { "jsCode": "return [{ json: { idempotencyKey: `reconcile-${Math.floor(Date.now() / 300000)}` } }];" },
+      "id": "686bb04a-fcca-45bd-b883-ab241d1cce66",
+      "name": "Build Idempotency Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-390, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RESTOFLOW_BASE_URL + '/api/integrations/n8n/replenishment-drafts/reconcile' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.RESTOFLOW_TOKEN }}" },
+            { "name": "Idempotency-Key", "value": "={{ $json.idempotencyKey }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ branchCode: $env.RESTOFLOW_PILOT_BRANCH || 'MAIN' }) }}",
+        "options": {}
+      },
+      "id": "55a33067-50be-4663-b37a-4ea7f3113702",
+      "name": "Reconcile Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-160, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "if (!$json.changed || !$json.draft) return [];\nconst lines = $json.draft.lines.map((line) => `• ${line.ingredientName}: ${line.quantity} ${line.unit}`).join('\\n');\nreturn [{ json: { ...$json, telegramMessage: `📦 Replenishment draft updated — ${$json.branch.name}\\n${lines}\\nReview: ${$env.RESTOFLOW_BASE_URL}${$json.draft.path}` } }];"
+      },
+      "id": "fca19144-b3a8-4b18-82d2-95268ca92d5e",
+      "name": "Only Changed Drafts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [70, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_OPERATIONS_CHAT_ID, text: $json.telegramMessage, disable_web_page_preview: true }) }}",
+        "options": {}
+      },
+      "id": "d87c50ae-5dcc-4070-82b7-d20da0272b8b",
+      "name": "Send Draft Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 0]
+    }
+  ],
+  "connections": {
+    "Every Five Minutes": { "main": [[{ "node": "Build Idempotency Key", "type": "main", "index": 0 }]] },
+    "Build Idempotency Key": { "main": [[{ "node": "Reconcile Draft", "type": "main", "index": 0 }]] },
+    "Reconcile Draft": { "main": [[{ "node": "Only Changed Drafts", "type": "main", "index": 0 }]] },
+    "Only Changed Drafts": { "main": [[{ "node": "Send Draft Link", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1", "timezone": "Asia/Manila" },
+  "active": false,
+  "versionId": "792bd7e4-8ae2-4ed1-925f-217c55359731"
+}

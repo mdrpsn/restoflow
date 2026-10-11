@@ -1,0 +1,34 @@
+name: Project checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: restoflow
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: restoflow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U restoflow -d restoflow_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://restoflow:test-only-password@localhost:5432/restoflow_test?schema=public
+      AUTH_SECRET: ci-only-auth-secret-not-for-deployment
+      AUTH_TRUST_HOST: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

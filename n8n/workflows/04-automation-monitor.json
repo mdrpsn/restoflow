@@ -1,0 +1,82 @@
+{
+  "name": "Restoflow - Automation Monitor",
+  "id": "9K6BvIsiHjDQpdwy",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "2b03b742-0f35-4a0e-86aa-5a5bad0d6fab",
+      "name": "Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-600, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "const execution = $json.execution ?? {};\nconst workflow = $json.workflow ?? {};\nreturn [{ json: { message: `🚨 n8n workflow failed\\nWorkflow: ${workflow.name ?? 'Unknown'}\\nExecution: ${execution.id ?? 'Unknown'}\\nError: ${execution.error?.message ?? $json.message ?? 'Unknown error'}` } }];"
+      },
+      "id": "0de3c3bb-4e2c-4c5a-a2ae-b26f9f0840ba",
+      "name": "Format Workflow Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-350, -120]
+    },
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] } },
+      "id": "d34c2030-40ae-478d-af3b-60b252450fc3",
+      "name": "Every Five Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 140]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.RESTOFLOW_BASE_URL + '/api/integrations/n8n/health?branch=' + ($env.RESTOFLOW_PILOT_BRANCH || 'MAIN') }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.RESTOFLOW_TOKEN }}" }] },
+        "options": {}
+      },
+      "id": "cd5aee33-463c-4f1f-85c0-bf04f8cb19c8",
+      "name": "Check Outbox Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-350, 140]
+    },
+    {
+      "parameters": {
+        "jsCode": "if ($json.ok) return [];\nreturn [{ json: { message: `⚠️ Restoflow automation backlog\\nPending events: ${$json.pendingCount}\\nStale events: ${$json.staleCount}\\nOldest: ${$json.oldestPendingAt ?? 'unknown'}\\nDelivery attempts: ${$json.oldestDeliveryAttempts}` } }];"
+      },
+      "id": "24095520-7841-443b-8d36-12e27414c20c",
+      "name": "Only Degraded Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-100, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_OWNER_CHAT_ID, text: $json.message }) }}",
+        "options": {}
+      },
+      "id": "5ca83e8a-0bb3-4f90-85f4-e846a2512a34",
+      "name": "Alert Owner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [170, 0]
+    }
+  ],
+  "connections": {
+    "Workflow Error": { "main": [[{ "node": "Format Workflow Error", "type": "main", "index": 0 }]] },
+    "Format Workflow Error": { "main": [[{ "node": "Alert Owner", "type": "main", "index": 0 }]] },
+    "Every Five Minutes": { "main": [[{ "node": "Check Outbox Health", "type": "main", "index": 0 }]] },
+    "Check Outbox Health": { "main": [[{ "node": "Only Degraded Health", "type": "main", "index": 0 }]] },
+    "Only Degraded Health": { "main": [[{ "node": "Alert Owner", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1", "timezone": "Asia/Manila" },
+  "active": false,
+  "versionId": "997f98d8-35f8-4d27-a86b-e64536e3fd83"
+}

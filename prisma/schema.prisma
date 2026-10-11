@@ -1,0 +1,784 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  MANAGER
+  CASHIER
+}
+
+enum MovementType {
+  SALE
+  SALE_VOID
+  RECEIVE
+  TRANSFER_OUT
+  TRANSFER_IN
+  TRANSFER_CANCEL
+  PO_RECEIVE
+  ADJUSTMENT
+  WASTE
+}
+
+enum BranchType {
+  STORE
+  WAREHOUSE
+}
+
+enum StockTransferStatus {
+  DRAFT
+  IN_TRANSIT
+  RECEIVED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  /// Delivery-platform orders (FoodPanda, GrabFood): the platform collects payment and pays the shop out later, so it never touches the cash drawer.
+  PLATFORM
+}
+
+/// Where an order came from. Drives the price list used and the sales breakdown. Walk-in includes dine-in and takeout.
+enum SalesChannel {
+  WALK_IN
+  FOODPANDA
+  GRABFOOD
+}
+
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+}
+
+/// A customer's self-order submitted via the QR menu, before a cashier has picked it up.
+/// Deliberately not a Sale: no payment or stock deduction happens until a cashier claims
+/// it and completes checkout through the normal POS flow — this is just a shareable cart.
+enum QrOrderStatus {
+  PENDING
+  CLAIMED
+  COMPLETED
+  CANCELLED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
+enum ModifierSelectionType {
+  /// Pick exactly one (e.g. Sweetness Level, Spicy/Not Spicy).
+  SINGLE
+  /// Pick any number, each with its own quantity (e.g. add-on toppings/sinkers).
+  MULTI
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches      Branch[]
+  users         User[]
+  products      Product[]
+  ingredients   Ingredient[]
+  suppliers     Supplier[]
+  purchaseOrders PurchaseOrder[]
+  integrationEvents IntegrationEvent[]
+  integrationMutations IntegrationMutation[]
+  modifierGroups ModifierGroup[]
+  inventoryImports InventoryImport[]
+  loginEvents LoginEvent[]
+}
+
+model Branch {
+  id             String     @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  type           BranchType @default(STORE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  stockItems   StockItem[]
+  movements    StockMovement[]
+  sales        Sale[]
+  qrOrders     QrOrder[]
+  transfersOut StockTransfer[] @relation("TransferFrom")
+  transfersIn  StockTransfer[] @relation("TransferTo")
+  userBranches UserBranch[]
+  purchaseOrders PurchaseOrder[]
+  stockRequests  StockRequest[] @relation("StockRequestBranch")
+  integrationEvents IntegrationEvent[]
+  productAvailability ProductAvailability[]
+  inventoryImports InventoryImport[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  /// Optional — owner/manager accounts made before this field existed have one;
+  /// cashiers created going forward log in with `username` instead (no email required).
+  email          String?  @unique
+  /// Login handle for accounts created without an email (first initial + last name,
+  /// e.g. "mrupisan"), auto-generated in lib/users.ts with a numeric suffix on collision.
+  username       String?  @unique
+  name           String
+  passwordHash   String
+  role           Role     @default(CASHIER)
+  active         Boolean  @default(true)
+  sessionVersion Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branches     UserBranch[]
+  sales        Sale[]
+  movements    StockMovement[]
+  qrOrdersClaimed QrOrder[]
+
+  transfersCreated   StockTransfer[] @relation("TransferCreatedBy")
+  transfersShipped   StockTransfer[] @relation("TransferShippedBy")
+  transfersReceived  StockTransfer[] @relation("TransferReceivedBy")
+  transfersCancelled StockTransfer[] @relation("TransferCancelledBy")
+  posCreated         PurchaseOrder[] @relation("PoCreatedBy")
+  posCancelled       PurchaseOrder[] @relation("PoCancelledBy")
+  stockRequestsMade     StockRequest[] @relation("StockRequestRequestedBy")
+  stockRequestsReviewed StockRequest[] @relation("StockRequestReviewedBy")
+  productAvailabilityChanges ProductAvailability[]
+  inventoryImports InventoryImport[]
+  loginEvents LoginEvent[]
+
+  @@index([organizationId])
+}
+
+/**
+ * One successful POS login, recorded at the moment credentials check out (see
+ * authorize() in lib/auth.ts). This is the only source for "what time did staff
+ * actually log in" — session cookies aren't persisted anywhere else, so this
+ * table is the entire audit trail; nothing here is ever recomputed from other
+ * data.
+ */
+model LoginEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model UserBranch {
+  userId   String
+  branchId String
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([userId, branchId])
+}
+
+model Product {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  category       String?
+  sku            String?
+  priceCents     Int
+  /// Public path under /uploads/products/, e.g. "/uploads/products/<id>.webp". Null
+  /// means no photo yet — the POS falls back to a monogram avatar (see ProductAvatar).
+  imageUrl       String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recipeLines  RecipeLine[]
+  saleLines    SaleLine[]
+  modifierGroups ProductModifierGroup[]
+  availability ProductAvailability[]
+  channelPrices ProductChannelPrice[]
+  qrOrderLines QrOrderLine[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/**
+ * Selling price on a delivery platform. Product.priceCents is the walk-in price; a
+ * platform with no row here falls back to it. The two platforms are separate rows so
+ * their prices can diverge (platform fees and promos differ).
+ */
+model ProductChannelPrice {
+  id         String       @id @default(cuid())
+  productId  String
+  channel    SalesChannel
+  priceCents Int
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, channel])
+}
+
+/**
+ * Per-branch "we're out of this right now" flag for the POS, distinct from
+ * Product.active (a catalog-level "is this a real menu item at all"). Sparse
+ * by design: a row only exists once someone has actually toggled a product
+ * at that branch — no row means available, so most products/branches never
+ * get one. Any POS staff can flip this, not just managers, since the whole
+ * point is a cashier can mark it the moment they notice they're out.
+ */
+model ProductAvailability {
+  id          String   @id @default(cuid())
+  branchId    String
+  productId   String
+  available   Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  updatedBy User?   @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([branchId, productId])
+  @@index([branchId])
+}
+
+/**
+ * One applied warehouse count-sheet import (see lib/warehouseImport.ts). The
+ * (branchId, fileHash) unique key is what makes re-uploading the exact same
+ * file a rejected no-op instead of posting the same stock movements twice.
+ * The movements themselves carry refType "warehouse_import" + refId = this id.
+ */
+model InventoryImport {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  sheetDate      DateTime @db.Date
+  fileName       String
+  fileHash       String
+  countedBy      String?
+  rowsApplied    Int
+  summary        Json
+  importedById   String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  importedBy   User?        @relation(fields: [importedById], references: [id], onDelete: SetNull)
+
+  @@unique([branchId, fileHash])
+  @@index([branchId, sheetDate])
+}
+
+model Ingredient {
+  id                String   @id @default(cuid())
+  organizationId    String
+  name              String
+  unit              String
+  costCentsPerUnit  Int      @default(0)
+  /// Supplier this ingredient is normally ordered from, carried from the source
+  /// catalog. Distinct from a branch's actual
+  /// StockItem/PurchaseOrder history — a default, not a hard rule.
+  defaultSupplierId String?
+  /// Suggested reorder threshold from the source catalog. StockItem.lowStockAt
+  /// is the real per-branch value once real opening counts exist; this is only
+  /// a sane starting point to pre-fill from, not itself an alert trigger.
+  defaultLowStockAt Decimal? @db.Decimal(14, 4)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  defaultSupplier Supplier?    @relation(fields: [defaultSupplierId], references: [id], onDelete: SetNull)
+  recipeLines     RecipeLine[]
+  stockItems      StockItem[]
+  movements       StockMovement[]
+  transferLines   StockTransferLine[]
+  packs           IngredientPack[]
+  poLines         PurchaseOrderLine[]
+  requestLines    StockRequestLine[]
+  modifiers       Modifier[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@index([defaultSupplierId])
+}
+
+model RecipeLine {
+  id           String  @id @default(cuid())
+  productId    String
+  ingredientId String
+  quantity     Decimal @db.Decimal(12, 4)
+  version      Int     @default(1)
+  isActive     Boolean @default(true)
+  /// null = consumed on every sale of the product. A value (25/50/75/100) = consumed only
+  /// when the sale line picked that Sweetness Level (Modifier.sweetnessPercent), which is
+  /// how sugar-level-dependent ingredients like fructose are tracked.
+  sweetnessPercent Int?
+
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, ingredientId, version, sweetnessPercent])
+  @@index([productId, isActive])
+}
+
+/// A way an ingredient is bought/moved (e.g. "430g bar", "1000ml bottle"). Stock is only ever
+/// held in the ingredient's base unit; a pack is an input/display convenience worth `size`
+/// base units. `isDefault` is the pack the warehouse view uses for "3 x bar" style hints.
+model IngredientPack {
+  id           String   @id @default(cuid())
+  ingredientId String
+  name         String
+  size         Decimal  @db.Decimal(14, 4)
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@unique([ingredientId, name])
+}
+
+model StockItem {
+  id            String   @id @default(cuid())
+  branchId      String
+  ingredientId  String
+  quantity      Decimal  @default(0) @db.Decimal(14, 4)
+  lowStockAt    Decimal  @default(0) @db.Decimal(14, 4)
+  /// Desired post-replenishment quantity. Null means alert only; no automatic draft line.
+  parLevel      Decimal? @db.Decimal(14, 4)
+  updatedAt     DateTime @updatedAt
+
+  branch     Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, ingredientId])
+  @@index([branchId])
+}
+
+model StockMovement {
+  id           String       @id @default(cuid())
+  branchId     String
+  ingredientId String
+  type         MovementType
+  quantity     Decimal      @db.Decimal(14, 4)
+  balanceAfter Decimal      @db.Decimal(14, 4)
+  refType      String?
+  refId        String?
+  note         String?
+  createdById  String?
+  createdAt    DateTime     @default(now())
+
+  branch     Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  createdBy  User?      @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([branchId, createdAt])
+  @@index([ingredientId, createdAt])
+  @@index([refType, refId])
+}
+
+model Sale {
+  id            String        @id @default(cuid())
+  branchId      String
+  cashierId     String
+  status        SaleStatus    @default(COMPLETED)
+  paymentMethod PaymentMethod
+  channel       SalesChannel  @default(WALK_IN)
+  /// The platform's own order number (e.g. FoodPanda order code), for matching payouts. Optional.
+  externalRef   String?
+  totalCents    Int
+  note          String?
+  createdAt     DateTime      @default(now())
+  voidedAt      DateTime?
+
+  branch  Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  cashier User       @relation(fields: [cashierId], references: [id], onDelete: Restrict)
+  lines   SaleLine[]
+  qrOrder QrOrder?
+
+  @@index([branchId, createdAt])
+  @@index([branchId, channel, createdAt])
+}
+
+/// One customer's QR-menu order, waiting for a cashier to claim it into the POS cart and
+/// take payment. `code` is a short per-branch pickup code (e.g. "042") shown to the customer
+/// so staff can call it out — no table numbers, no accounts.
+model QrOrder {
+  id           String        @id @default(cuid())
+  branchId     String
+  code         String
+  customerName String
+  status       QrOrderStatus @default(PENDING)
+  /// As-submitted estimate for display in the pending queue; completeSale() recomputes the
+  /// authoritative total (current prices/modifiers) when the cashier finishes checkout.
+  totalCents   Int
+  note         String?
+  createdAt    DateTime      @default(now())
+  claimedAt    DateTime?
+  claimedById  String?
+  cancelledAt  DateTime?
+  completedAt  DateTime?
+  saleId       String?      @unique
+  /// Old claims were not linked to checkout; only new claims can safely be resumed.
+  checkoutTracked Boolean   @default(false)
+
+  branch    Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  claimedBy User?         @relation(fields: [claimedById], references: [id], onDelete: SetNull)
+  sale      Sale?         @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  lines     QrOrderLine[]
+
+  @@index([branchId, status, createdAt])
+}
+
+model QrOrderLine {
+  id         String  @id @default(cuid())
+  qrOrderId  String
+  productId  String
+  quantity   Int
+  unitCents  Int
+  totalCents Int
+  /// Selected modifiers as submitted: [{ modifierId, quantity }]. Re-validated against
+  /// current modifier groups/prices at claim time via the same path a POS cart uses.
+  modifiers  Json?
+
+  qrOrder QrOrder @relation(fields: [qrOrderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([qrOrderId])
+}
+
+model SaleLine {
+  id            String  @id @default(cuid())
+  saleId        String
+  productId     String
+  quantity      Int
+  unitCents     Int
+  totalCents    Int
+  recipeVersion Int?
+  /// Snapshot of the Sweetness Level picked on this line, so voids and food-cost
+  /// reports can rebuild exactly which sweetness-dependent recipe lines applied.
+  sweetnessPercent Int?
+
+  sale      Sale               @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product   Product            @relation(fields: [productId], references: [id], onDelete: Restrict)
+  modifiers SaleLineModifier[]
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model StockTransfer {
+  id            String               @id @default(cuid())
+  fromBranchId  String
+  toBranchId    String
+  status        StockTransferStatus  @default(DRAFT)
+  note          String?
+  createdById   String?
+  createdAt     DateTime             @default(now())
+  shippedById   String?
+  shippedAt     DateTime?
+  receivedById  String?
+  receivedAt    DateTime?
+  cancelledById String?
+  cancelledAt   DateTime?
+
+  fromBranch  Branch              @relation("TransferFrom", fields: [fromBranchId], references: [id], onDelete: Cascade)
+  toBranch    Branch              @relation("TransferTo", fields: [toBranchId], references: [id], onDelete: Cascade)
+  lines       StockTransferLine[]
+  createdBy   User?               @relation("TransferCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  shippedBy   User?               @relation("TransferShippedBy", fields: [shippedById], references: [id], onDelete: SetNull)
+  receivedBy  User?               @relation("TransferReceivedBy", fields: [receivedById], references: [id], onDelete: SetNull)
+  cancelledBy User?               @relation("TransferCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+  request     StockRequest?
+
+  @@index([fromBranchId, createdAt])
+  @@index([toBranchId, createdAt])
+  @@index([status])
+}
+
+enum StockRequestStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum StockRequestSource {
+  MANUAL
+  AUTOMATION
+}
+
+enum IntegrationEventType {
+  INVENTORY_LOW
+  INVENTORY_CRITICAL
+  INVENTORY_RECOVERED
+  NEGATIVE_STOCK_OVERRIDE
+  MISSING_RECIPE
+  WASTE_LOGGED
+}
+
+enum IntegrationEventSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/**
+ * A branch's ask for stock from the warehouse — reviewed by whoever manages
+ * the warehouse branch, then converted 1:1 into a real StockTransfer (see
+ * approveStockRequest in lib/stockRequests.ts) so the warehouse side never
+ * re-types line items the branch already entered. Always warehouse-sourced:
+ * the org's single WAREHOUSE-type branch is resolved at request/approval
+ * time rather than stored here, since there's only ever one today.
+ */
+model StockRequest {
+  id              String             @id @default(cuid())
+  organizationId  String
+  branchId        String
+  status          StockRequestStatus @default(PENDING)
+  source          StockRequestSource @default(MANUAL)
+  /// Stable only while an automation-created request is a draft. Cleared on submission.
+  automationKey   String?            @unique
+  note            String?
+  requestedById   String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  transferId      String?            @unique
+
+  branch      Branch             @relation("StockRequestBranch", fields: [branchId], references: [id], onDelete: Cascade)
+  requestedBy User?              @relation("StockRequestRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  reviewedBy  User?              @relation("StockRequestReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  transfer    StockTransfer?     @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  lines       StockRequestLine[]
+
+  @@index([organizationId, status])
+  @@index([branchId])
+  @@index([branchId, source, status])
+}
+
+model StockRequestLine {
+  id               String   @id @default(cuid())
+  stockRequestId   String
+  ingredientId     String
+  quantity         Decimal  @db.Decimal(14, 4)
+  /** Set at approval time; may be lower than `quantity` for a partial fulfillment, or omitted (line dropped) if 0. */
+  approvedQuantity Decimal? @db.Decimal(14, 4)
+
+  stockRequest StockRequest @relation(fields: [stockRequestId], references: [id], onDelete: Cascade)
+  ingredient   Ingredient   @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+}
+
+model IntegrationEvent {
+  id               String                   @id @default(cuid())
+  organizationId   String
+  branchId          String?
+  type              IntegrationEventType
+  severity          IntegrationEventSeverity
+  payload           Json
+  dedupeKey         String                   @unique
+  deliveryAttempts Int                      @default(0)
+  lastDeliveredAt  DateTime?
+  acknowledgedAt   DateTime?
+  createdAt         DateTime                 @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, acknowledgedAt, createdAt])
+  @@index([branchId, createdAt])
+}
+
+model IntegrationMutation {
+  id             String   @id @default(cuid())
+  organizationId String
+  operation      String
+  idempotencyKey String
+  response       Json
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, operation, idempotencyKey])
+  @@index([organizationId, createdAt])
+}
+
+model StockTransferLine {
+  id           String  @id @default(cuid())
+  transferId   String
+  ingredientId String
+  /// Always in the ingredient's base unit (the only unit stock is held and deducted in).
+  quantity     Decimal @db.Decimal(14, 4)
+  /// Snapshot of how the sender entered it, e.g. 3 x "430g bar". Display only; already
+  /// converted into `quantity`. Null when entered directly in the base unit.
+  packLabel    String?
+  packQuantity Decimal? @db.Decimal(14, 4)
+
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  ingredient Ingredient    @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+}
+
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  contactEmail   String?
+  contactPhone   String?
+  notes          String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  purchaseOrders PurchaseOrder[]
+  defaultForIngredients Ingredient[]
+
+  @@unique([organizationId, name])
+}
+
+model PurchaseOrder {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String
+  supplierId     String
+  status         PurchaseOrderStatus @default(DRAFT)
+  note           String?
+  orderedAt      DateTime?
+  receivedAt     DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  createdById    String?
+  cancelledById  String?
+  cancelledAt    DateTime?
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  lines        PurchaseOrderLine[]
+  createdBy    User?               @relation("PoCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  cancelledBy  User?               @relation("PoCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([branchId])
+}
+
+model PurchaseOrderLine {
+  id              String  @id @default(cuid())
+  purchaseOrderId String
+  ingredientId    String
+  quantityOrdered Decimal @db.Decimal(14, 4)
+  quantityReceived Decimal @default(0) @db.Decimal(14, 4)
+  unitCostCents   Int     @default(0)
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  ingredient    Ingredient    @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+}
+
+/**
+ * A named set of customer-facing options offered on the products it's linked to
+ * (see ProductModifierGroup) — e.g. "MT Add-Ons" (sinkers/toppings, MULTI-select,
+ * optional) or "Sweetness Level" (SINGLE-select, required). Org-scoped so each
+ * tenant can define its own menu structure.
+ */
+model ModifierGroup {
+  id             String                @id @default(cuid())
+  organizationId String
+  name           String
+  selectionType  ModifierSelectionType @default(MULTI)
+  /// SINGLE groups the customer must choose from when ordering a linked product (e.g. Sweetness Level). Ignored for MULTI groups today — add-ons are always optional.
+  required       Boolean               @default(false)
+  active         Boolean               @default(true)
+  sortOrder      Int                   @default(0)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  modifiers    Modifier[]
+  products     ProductModifierGroup[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/**
+ * One selectable option within a ModifierGroup (e.g. "Black Pearl", "50%").
+ * priceCents is the customer upcharge (0 for free choices like sweetness level).
+ * ingredientId/ingredientQty are for a later pass once real per-selection
+ * consumption ratios are known — see prisma/seed.ts for why they're left
+ * unset today, same reasoning as Product.recipeLines.
+ */
+model Modifier {
+  id              String   @id @default(cuid())
+  modifierGroupId String
+  name            String
+  priceCents      Int      @default(0)
+  ingredientId    String?
+  ingredientQty   Decimal? @db.Decimal(12, 4)
+  /// Set on the options of a Sweetness Level group (25/50/75/100); picking one makes
+  /// the sale line use RecipeLines carrying the same sweetnessPercent.
+  sweetnessPercent Int?
+  active          Boolean  @default(true)
+  sortOrder       Int      @default(0)
+
+  modifierGroup     ModifierGroup      @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  ingredient        Ingredient?        @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+  saleLineModifiers SaleLineModifier[]
+
+  @@unique([modifierGroupId, name])
+  @@index([modifierGroupId])
+  @@index([ingredientId])
+}
+
+/// Which ModifierGroups a Product offers at checkout (e.g. Milk Tea products offer both "MT Add-Ons" and "Sweetness Level").
+model ProductModifierGroup {
+  productId       String
+  modifierGroupId String
+
+  product       Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  modifierGroup ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@id([productId, modifierGroupId])
+  @@index([modifierGroupId])
+}
+
+/**
+ * A modifier selection recorded on a sale. Snapshots name/price (and ingredient
+ * consumption, once that's wired up) at sale time so later edits to the
+ * Modifier itself don't rewrite history — same pattern as SaleLine.recipeVersion.
+ */
+model SaleLineModifier {
+  id            String   @id @default(cuid())
+  saleLineId    String
+  modifierId    String?
+  name          String
+  priceCents    Int
+  quantity      Int      @default(1)
+  ingredientId  String?
+  ingredientQty Decimal? @db.Decimal(12, 4)
+
+  saleLine SaleLine  @relation(fields: [saleLineId], references: [id], onDelete: Cascade)
+  modifier Modifier? @relation(fields: [modifierId], references: [id], onDelete: SetNull)
+
+  @@index([saleLineId])
+  @@index([modifierId])
+}

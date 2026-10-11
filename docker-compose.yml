@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: restoflow
+      POSTGRES_PASSWORD: restoflow
+      POSTGRES_DB: restoflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - restoflow_pg:/var/lib/postgresql/data
+
+volumes:
+  restoflow_pg:
