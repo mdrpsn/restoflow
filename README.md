@@ -4,6 +4,8 @@ A multi-branch restaurant POS and inventory system, built for a small restaurant
 
 **Status:** in development. A production pilot at one branch is planned. This public copy contains only synthetic demo data. The production system, with the real catalog, recipes, and prices, is in a private repository.
 
+**Live demo:** https://restoflow-demo.vercel.app, running on synthetic data. Sign in as `cashier@demo.local`, `manager@demo.local` or `owner@demo.local` with the password `password123`. Anyone can use these logins and change the data, so it may be reset at any time.
+
 **Stack:** Next.js 15 (App Router), TypeScript, Tailwind, PostgreSQL with Prisma, Auth.js, Vitest, Docker, n8n for alerts.
 
 ## Screenshots

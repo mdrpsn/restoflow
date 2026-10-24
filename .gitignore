@@ -45,3 +45,4 @@ next-env.d.ts
 # itself (and .gitkeep) stays tracked so it exists on a fresh clone
 /public/uploads/products/*
 !/public/uploads/products/.gitkeep
+.env.local
